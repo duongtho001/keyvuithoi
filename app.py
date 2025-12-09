@@ -494,6 +494,13 @@ def validate_license():
 @require_admin
 def list_licenses():
     """List all licenses (admin only)."""
+    if USE_GOOGLE_SHEETS:
+        try:
+            licenses = sheets_list_licenses()
+            return jsonify({"licenses": licenses, "count": len(licenses)})
+        except Exception as e:
+            return jsonify({"success": False, "error": f"Sheets Error: {str(e)}"}), 500
+
     conn = get_db()
     cursor = conn.execute("SELECT * FROM licenses ORDER BY created_at DESC")
     rows = cursor.fetchall()
