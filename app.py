@@ -300,6 +300,10 @@ def check_auth():
 @app.route('/api/debug', methods=['GET'])
 def debug_info():
     """Debug server status."""
+    # Try to initialize sheets if not already
+    if USE_GOOGLE_SHEETS and not gspread_client:
+        init_google_sheets_from_settings()
+    
     return jsonify({
         "status": "online",
         "startup_error": STARTUP_ERROR,
@@ -307,6 +311,7 @@ def debug_info():
         "use_google_sheets": USE_GOOGLE_SHEETS,
         "has_sheet_id": bool(GOOGLE_SHEET_ID),
         "has_credentials": bool(GOOGLE_CREDS_JSON),
+        "sheets_connected": gspread_client is not None,
         "env_vercel": bool(os.environ.get("VERCEL"))
     })
 
