@@ -497,6 +497,24 @@ def add_license():
     license_key = data.get('license_key') or generate_license_key(device_id, days)
     expiry_date = data.get('expiry_date') or (datetime.now() + timedelta(days=days)).isoformat()
     
+    if USE_GOOGLE_SHEETS:
+        data['device_id'] = device_id
+        data['license_key'] = license_key
+        data['expiry_date'] = expiry_date
+        if 'status' not in data: data['status'] = 'active'
+        data['customer_name'] = data.get('customer_name', '')
+        data['notes'] = data.get('notes', '')
+        
+        if sheets_add_license(data):
+            return jsonify({
+                "success": True, 
+                "message": "License created (Sheets)",
+                "license_key": license_key,
+                "expiry_date": expiry_date
+            })
+        else:
+            return jsonify({"success": False, "error": "Could not add to Sheets (maybe duplicate?)"}), 400
+
     try:
         conn = get_db()
         conn.execute('''
@@ -550,6 +568,12 @@ def update_license(device_id):
     if not updates:
         return jsonify({"success": False, "error": "No updates provided"}), 400
     
+    if USE_GOOGLE_SHEETS:
+        if sheets_update_license(device_id, data):
+            return jsonify({"success": True, "message": "License updated (Sheets)"})
+        else:
+            return jsonify({"success": False, "error": "Update failed (not found?)"}), 404
+
     values.append(device_id.upper())
     
     conn = get_db()
@@ -570,6 +594,12 @@ def update_license(device_id):
 @require_admin
 def delete_license(device_id):
     """Delete a license (admin only)."""
+    if USE_GOOGLE_SHEETS:
+        if sheets_delete_license(device_id):
+            return jsonify({"success": True, "message": "License deleted (Sheets)"})
+        else:
+            return jsonify({"success": False, "error": "Delete failed"}), 404
+
     conn = get_db()
     cursor = conn.execute(
         "DELETE FROM licenses WHERE UPPER(device_id) = ?",
@@ -591,6 +621,31 @@ def extend_license(device_id):
     data = request.json or {}
     days = int(data.get('days', 30))
     
+    if USE_GOOGLE_SHEETS:
+        row, _ = sheets_find_license(device_id)
+        if not row:
+            return jsonify({"success": False, "error": "Device ID not found"}), 404
+        
+        current_expiry = datetime.now()
+        if row.get('expiry_date'):
+            try:
+                current_expiry = datetime.fromisoformat(row['expiry_date'].replace('Z', '+00:00')).replace(tzinfo=None)
+                if current_expiry < datetime.now(): current_expiry = datetime.now()
+            except: pass
+            
+        new_expiry = (current_expiry + timedelta(days=days)).isoformat()
+        total_days = (datetime.fromisoformat(new_expiry) - datetime.now()).days
+        new_key = generate_license_key(device_id, total_days)
+        
+        if sheets_update_license(device_id, {'expiry_date': new_expiry, 'license_key': new_key}):
+            return jsonify({
+                "success": True, 
+                "message": f"Extended by {days} days (Sheets)",
+                "new_expiry": new_expiry,
+                "license_key": new_key
+            })
+        return jsonify({"success": False, "error": "Sheet update failed"}), 500
+
     conn = get_db()
     cursor = conn.execute(
         "SELECT expiry_date FROM licenses WHERE UPPER(device_id) = ?",
@@ -1084,11 +1139,17 @@ ADMIN_HTML = '''
         
         function updateSheetsStatus(connected, hasCreds) {
             const el = document.getElementById('sheetsStatusText');
+            const credsInput = document.getElementById('settingsCredentials');
+            
             if (connected) {
-                el.innerHTML = '🟢 Đã kết nối Google Sheets';
+                el.innerHTML = '🟢 Đã kết nối Google Sheets (OK)';
                 el.style.color = '#10b981';
+                // If connected via Env Vars, hide the input or show placeholder
+                if (!credsInput.value) {
+                    credsInput.placeholder = "✅ Đã nhận Credentials từ biến môi trường (Vercel). Không cần dán lại trừ khi muốn đổi.";
+                }
             } else if (hasCreds) {
-                el.innerHTML = '🟡 Có credentials, chưa kết nối';
+                el.innerHTML = '🟡 Có credentials, đang kết nối...';
                 el.style.color = '#f59e0b';
             } else {
                 el.innerHTML = '🔴 Chưa cấu hình';
