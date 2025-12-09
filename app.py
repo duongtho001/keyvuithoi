@@ -25,11 +25,22 @@ app = Flask(__name__)
 CORS(app)  # Allow cross-origin requests
 app.secret_key = os.environ.get("FLASK_SECRET", "change-this-secret-key-in-production")
 
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({"success": False, "error": f"Internal Server Error: {str(error)}"}), 500
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    return jsonify({"success": False, "error": f"Exception: {str(e)}"}), 500
+
+
 # Configuration
 SECRET_KEY = os.environ.get("SECRET_KEY", "VFX_SECRET_2024_THOTOOL")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
-DATABASE = os.environ.get("DATABASE", "licenses.db")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
+# Use /tmp for database on Vercel/Serverless to avoid Read-Only error
+DATABASE = os.path.join("/tmp", "licenses.db") if os.environ.get("VERCEL") else os.environ.get("DATABASE", "licenses.db")
 
 # Google Sheets Configuration
 USE_GOOGLE_SHEETS = os.environ.get("USE_GOOGLE_SHEETS", "false").lower() == "true"
@@ -202,8 +213,13 @@ def init_db():
     conn.commit()
     conn.close()
 
-# Initialize on startup
-init_db()
+# Initialize on startup (Wrapped to prevent Vercel boot loop 500s)
+STARTUP_ERROR = None
+try:
+    init_db()
+except Exception as e:
+    STARTUP_ERROR = f"Startup Error: {e}"
+    print(STARTUP_ERROR)
 
 # ============= LICENSE GENERATION =============
 
@@ -277,7 +293,22 @@ def check_auth():
     """Check if user is logged in."""
     if session.get('logged_in'):
         return jsonify({"logged_in": True, "username": session.get('username')})
+    if session.get('logged_in'):
+        return jsonify({"logged_in": True, "username": session.get('username')})
     return jsonify({"logged_in": False})
+
+@app.route('/api/debug', methods=['GET'])
+def debug_info():
+    """Debug server status."""
+    return jsonify({
+        "status": "online",
+        "startup_error": STARTUP_ERROR,
+        "database_path": DATABASE,
+        "use_google_sheets": USE_GOOGLE_SHEETS,
+        "has_sheet_id": bool(GOOGLE_SHEET_ID),
+        "has_credentials": bool(GOOGLE_CREDS_JSON),
+        "env_vercel": bool(os.environ.get("VERCEL"))
+    })
 
 # ============= SETTINGS API =============
 
@@ -505,15 +536,19 @@ def add_license():
         data['customer_name'] = data.get('customer_name', '')
         data['notes'] = data.get('notes', '')
         
-        if sheets_add_license(data):
-            return jsonify({
-                "success": True, 
-                "message": "License created (Sheets)",
-                "license_key": license_key,
-                "expiry_date": expiry_date
-            })
-        else:
-            return jsonify({"success": False, "error": "Could not add to Sheets (maybe duplicate?)"}), 400
+        try:
+            if sheets_add_license(data):
+                return jsonify({
+                    "success": True, 
+                    "message": "License created (Sheets)",
+                    "license_key": license_key,
+                    "expiry_date": expiry_date
+                })
+            else:
+                return jsonify({"success": False, "error": "Could not add to Sheets. Check permissions or valid Sheet ID."}), 400
+        except Exception as e:
+            print(f"Sheet Error: {e}")
+            return jsonify({"success": False, "error": f"Sheet Error: {str(e)}"}), 500
 
     try:
         conn = get_db()
@@ -698,6 +733,9 @@ ADMIN_HTML = '''
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Segoe UI', sans-serif; background: #f1f5f9; min-height: 100vh; }
         
+        button { cursor: pointer; transition: opacity 0.2s; }
+        button:disabled { opacity: 0.7; cursor: not-allowed; }
+        
         .header { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; padding: 20px; display: flex; justify-content: space-between; align-items: center; }
         .header h1 { font-size: 24px; }
         .header .user-info { display: flex; align-items: center; gap: 15px; }
@@ -756,7 +794,9 @@ ADMIN_HTML = '''
         .status-disabled { color: #ef4444; }
         .status-expired { color: #f59e0b; }
         
-        .toast { position: fixed; bottom: 20px; right: 20px; padding: 15px 25px; border-radius: 8px; color: white; animation: fadeIn 0.3s; }
+        .status-expired { color: #f59e0b; }
+        
+        .toast { position: fixed; bottom: 20px; right: 20px; padding: 15px 25px; border-radius: 8px; color: white; animation: fadeIn 0.3s; z-index: 9999; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
 </style>
 </head>
@@ -835,7 +875,7 @@ ADMIN_HTML = '''
                             <option value="365">1 year</option>
                         </select>
                     </div>
-                    <button class="btn-success" style="width:100%" onclick="addLicense()">➕ Add License</button>
+                    <button id="btnAddLicense" class="btn-success" style="width:100%" onclick="addLicense()">➕ Add License</button>
                 </div>
                 
                 <!-- Edit -->
@@ -1038,18 +1078,34 @@ ADMIN_HTML = '''
                 showToast('Please enter Device ID', 'error');
                 return;
             }
+            if (!device_id) {
+                showToast('Please enter Device ID', 'error');
+                return;
+            }
             
-            const result = await apiCall('/api/licenses', 'POST', { device_id, customer_name, days });
+            const btn = document.getElementById('btnAddLicense');
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '⏳ Adding...';
+            btn.disabled = true;
             
-            if (result.success) {
-                showToast('License created!', 'success');
-                document.getElementById('licenseKey').textContent = result.license_key;
-                document.getElementById('keyDisplay').style.display = 'block';
-                document.getElementById('newDeviceId').value = '';
-                document.getElementById('newCustomer').value = '';
-                loadLicenses();
-            } else {
-                showToast(result.error, 'error');
+            try {
+                const result = await apiCall('/api/licenses', 'POST', { device_id, customer_name, days });
+                
+                if (result.success) {
+                    showToast('✅ ' + result.message, 'success');
+                    document.getElementById('licenseKey').textContent = result.license_key;
+                    document.getElementById('keyDisplay').style.display = 'block';
+                    document.getElementById('newDeviceId').value = '';
+                    document.getElementById('newCustomer').value = '';
+                    loadLicenses();
+                } else {
+                    showToast('❌ ' + result.error, 'error');
+                }
+            } catch (e) {
+                showToast('❌ Network Error: ' + e.message, 'error');
+            } finally {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
             }
         }
         
